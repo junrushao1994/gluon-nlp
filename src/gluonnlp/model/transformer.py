@@ -368,7 +368,6 @@ class BaseTransformerEncoder(HybridBlock, Seq2SeqEncoder):
                     scaled=scaled, output_attention=output_attention,
                     prefix='transformer%d_'%i)
 
-
     def __call__(self, inputs, states=None, valid_length=None): #pylint: disable=arguments-differ
         """Encoder the inputs given the states and valid sequence length.
 
@@ -390,54 +389,9 @@ class BaseTransformerEncoder(HybridBlock, Seq2SeqEncoder):
             - outputs of the transformer encoder. Shape (batch_size, length, C_out)
             - additional_outputs of all the transformer encoder
         """
-        return super(BaseTransformerEncoder, self).__call__(inputs, states, valid_length)
-
-    def forward(self, inputs, states=None, valid_length=None, steps=None): # pylint: disable=arguments-differ
-        """
-
-        Parameters
-        ----------
-        inputs : NDArray, Shape(batch_size, length, C_in)
-        states : list of NDArray
-        valid_length : NDArray
-        steps : NDArray
-            Stores value [0, 1, ..., length].
-            It is used for lookup in positional encoding matrix
-
-        Returns
-        -------
-        outputs : NDArray
-            The output of the encoder. Shape is (batch_size, length, C_out)
-        additional_outputs : list
-            Either be an empty list or contains the attention weights in this step.
-            The attention weights will have shape (batch_size, length, length) or
-            (batch_size, num_heads, length, length)
-
-        """
-        length = inputs.shape[1]
-        if valid_length is not None:
-            mask = mx.nd.broadcast_lesser(
-                mx.nd.arange(length, ctx=valid_length.context).reshape((1, -1)),
-                valid_length.reshape((-1, 1)))
-            mask = mx.nd.broadcast_axes(mx.nd.expand_dims(mask, axis=1), axis=1, size=length)
-            if states is None:
-                states = [mask]
-            else:
-                states.append(mask)
-        if self._scale_embed:
-            inputs = inputs * math.sqrt(inputs.shape[-1])
-        steps = mx.nd.arange(length, ctx=inputs.context)
         if states is None:
-            states = [steps]
-        else:
-            states.append(steps)
-        if valid_length is not None:
-            step_output, additional_outputs =\
-                super(BaseTransformerEncoder, self).forward(inputs, states, valid_length)
-        else:
-            step_output, additional_outputs =\
-                super(BaseTransformerEncoder, self).forward(inputs, states)
-        return step_output, additional_outputs
+            states = []
+        return super(BaseTransformerEncoder, self).__call__(inputs, states, valid_length)
 
     def hybrid_forward(self, F, inputs, states=None, valid_length=None, position_weight=None):
         # pylint: disable=arguments-differ
@@ -460,6 +414,25 @@ class BaseTransformerEncoder(HybridBlock, Seq2SeqEncoder):
             (batch_size, num_heads, length, length)
 
         """
+        length = inputs.shape_array().slice_axis(axis=0, begin=1, end=2)
+        c_in = inputs.shape_array().slice_axis(axis=0, begin=2, end=3)
+        if states is None:
+            states = []
+        if valid_length is not None:
+            mask = F.broadcast_lesser(
+                F.contrib.sarange(length).reshape((1, -1)),
+                valid_length.reshape((-1, 1)))
+            mask = F.expand_dims(mask, axis=1)
+            # TODO(@junrushao1994): actually we need a broadcast here
+            # rather than faking a dynamic shape thing.
+            fake = F.contrib.sarange(length).reshape((1, -1, 1)) < 0
+            mask = F.broadcast_add(mask, fake)
+            states.append(mask)
+        if self._scale_embed:
+            # TODO(@junrushao1994): remove the hardcoded stuff
+            inputs = inputs * F.sqrt(mx.symbol.cast(c_in, "float32"))
+        steps = F.contrib.sarange(length)
+        states.append(steps)
         if states is not None:
             steps = states[-1]
             # Positional Encoding
