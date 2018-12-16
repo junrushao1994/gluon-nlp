@@ -98,11 +98,13 @@ class BasePositionwiseFFN(HybridBlock):
         self._use_residual = use_residual
         with self.name_scope():
             self.ffn_1 = nn.Dense(units=hidden_size, flatten=False,
+                                  in_units=units,
                                   weight_initializer=weight_initializer,
                                   bias_initializer=bias_initializer,
                                   prefix='ffn_1_')
             self.activation = self._get_activation(activation) if activation else None
             self.ffn_2 = nn.Dense(units=units, flatten=False,
+                                  in_units=hidden_size,
                                   weight_initializer=weight_initializer,
                                   bias_initializer=bias_initializer,
                                   prefix='ffn_2_')
@@ -208,7 +210,7 @@ class BaseTransformerEncoderCell(HybridBlock):
                                                       scaled=scaled,
                                                       dropout=dropout,
                                                       use_bias=attention_use_bias)
-            self.proj = nn.Dense(units=units, flatten=False,
+            self.proj = nn.Dense(units=units, flatten=False, in_units=units,
                                  use_bias=attention_proj_use_bias,
                                  weight_initializer=weight_initializer,
                                  bias_initializer=bias_initializer,
@@ -430,7 +432,7 @@ class BaseTransformerEncoder(HybridBlock, Seq2SeqEncoder):
             states.append(mask)
         if self._scale_embed:
             # TODO(@junrushao1994): remove the hardcoded stuff
-            inputs = inputs * F.sqrt(mx.symbol.cast(c_in, "float32"))
+            inputs = F.broadcast_mul(inputs, F.sqrt(mx.symbol.cast(c_in, "float32")))
         steps = F.contrib.sarange(length)
         states.append(steps)
         if states is not None:

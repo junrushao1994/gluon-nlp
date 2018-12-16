@@ -183,7 +183,7 @@ class MultiHeadAttentionCell(AttentionCell):
         See document of `Block`.
     """
     def __init__(self, base_cell, query_units, key_units, value_units, num_heads, use_bias=True,
-                 weight_initializer=None, bias_initializer='zeros', prefix=None, params=None):
+                 weight_initializer=None, bias_initializer='zeros', in_units=None, prefix=None, params=None):
         super(MultiHeadAttentionCell, self).__init__(prefix=prefix, params=params)
         self._base_cell = base_cell
         self._query_units = query_units
@@ -208,12 +208,15 @@ class MultiHeadAttentionCell(AttentionCell):
 
         with self.name_scope():
             self.proj_query = nn.Dense(units=self._query_units, use_bias=self._use_bias,
+                                       in_units=in_units,
                                        flatten=False, weight_initializer=weight_initializer,
                                        bias_initializer=bias_initializer, prefix='query_')
             self.proj_key = nn.Dense(units=self._key_units, use_bias=self._use_bias,
+                                     in_units=in_units,
                                      flatten=False, weight_initializer=weight_initializer,
                                      bias_initializer=bias_initializer, prefix='key_')
             self.proj_value = nn.Dense(units=self._value_units, use_bias=self._use_bias,
+                                       in_units=in_units,
                                        flatten=False, weight_initializer=weight_initializer,
                                        bias_initializer=bias_initializer, prefix='value_')
 
