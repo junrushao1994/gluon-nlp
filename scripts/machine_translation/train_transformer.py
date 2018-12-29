@@ -183,7 +183,7 @@ model = NMTModel(src_vocab=src_vocab, tgt_vocab=tgt_vocab, encoder=encoder, deco
                  share_embed=args.dataset != 'TOY', embed_size=args.num_units,
                  tie_weights=args.dataset != 'TOY', embed_initializer=None, prefix='transformer_')
 model.initialize(init=mx.init.Xavier(magnitude=args.magnitude), ctx=ctx)
-static_alloc = True
+static_alloc = False
 model.hybridize(static_alloc=static_alloc)
 logging.info(model)
 

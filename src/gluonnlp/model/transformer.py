@@ -432,7 +432,7 @@ class BaseTransformerEncoder(HybridBlock, Seq2SeqEncoder):
             states.append(mask)
         if self._scale_embed:
             # TODO(@junrushao1994): remove the hardcoded stuff
-            inputs = F.broadcast_mul(inputs, F.sqrt(mx.symbol.cast(c_in, "float32")))
+            inputs = F.broadcast_mul(inputs, F.sqrt(F.cast(c_in, "float32")))
         steps = F.contrib.sarange(length)
         states.append(steps)
         if states is not None:
@@ -699,12 +699,14 @@ class TransformerDecoderCell(HybridBlock):
                                                             num_heads=num_heads,
                                                             scaled=scaled,
                                                             dropout=dropout)
-            self.proj_in = nn.Dense(units=units, flatten=False,
+            self.proj_in = nn.Dense(in_units=units,
+                                    units=units, flatten=False,
                                     use_bias=False,
                                     weight_initializer=weight_initializer,
                                     bias_initializer=bias_initializer,
                                     prefix='proj_in_')
-            self.proj_inter = nn.Dense(units=units, flatten=False,
+            self.proj_inter = nn.Dense(in_units=units,
+                                       units=units, flatten=False,
                                        use_bias=False,
                                        weight_initializer=weight_initializer,
                                        bias_initializer=bias_initializer,
@@ -716,8 +718,8 @@ class TransformerDecoderCell(HybridBlock):
                                        weight_initializer=weight_initializer,
                                        bias_initializer=bias_initializer)
 
-            self.layer_norm_in = nn.LayerNorm()
-            self.layer_norm_inter = nn.LayerNorm()
+            self.layer_norm_in = nn.LayerNorm(in_channels=units)
+            self.layer_norm_inter = nn.LayerNorm(in_channels=units)
 
     def hybrid_forward(self, F, inputs, mem_value, mask=None, mem_mask=None):  #pylint: disable=unused-argument
         #  pylint: disable=arguments-differ
@@ -824,7 +826,7 @@ class TransformerDecoder(HybridBlock, Seq2SeqDecoder):
         self._scale_embed = scale_embed
         with self.name_scope():
             self.dropout_layer = nn.Dropout(dropout)
-            self.layer_norm = nn.LayerNorm()
+            self.layer_norm = nn.LayerNorm(in_channels=units)
             encoding = _position_encoding_init(max_length, units)
             self.position_weight = self.params.get_constant('const', encoding)
             self.transformer_cells = nn.HybridSequential()
@@ -948,53 +950,13 @@ class TransformerDecoder(HybridBlock, Seq2SeqDecoder):
         return super(TransformerDecoder, self).__call__(step_input, states)
 
     def forward(self, step_input, states, mask=None):  #pylint: disable=arguments-differ, missing-docstring
-        input_shape = step_input.shape
-        mem_mask = None
-        # If it is in testing, transform input tensor to a tensor with shape NTC
-        # Otherwise remove the None in states.
-        if len(input_shape) == 2:
-            if self._encoder_valid_length is not None:
-                has_last_embeds = len(states) == 3
-            else:
-                has_last_embeds = len(states) == 2
-            if has_last_embeds:
-                last_embeds = states[0]
-                step_input = mx.nd.concat(last_embeds,
-                                          mx.nd.expand_dims(step_input, axis=1),
-                                          dim=1)
-                states = states[1:]
-            else:
-                step_input = mx.nd.expand_dims(step_input, axis=1)
-        elif states[0] is None:
-            states = states[1:]
-        has_mem_mask = (len(states) == 2)
-        if has_mem_mask:
-            _, mem_mask = states
-            augmented_mem_mask = mx.nd.expand_dims(mem_mask, axis=1)\
-                .broadcast_axes(axis=1, size=step_input.shape[1])
-            states[-1] = augmented_mem_mask
-        if mask is None:
-            length_array = mx.nd.arange(step_input.shape[1], ctx=step_input.context)
-            mask = mx.nd.broadcast_lesser_equal(
-                length_array.reshape((1, -1)),
-                length_array.reshape((-1, 1)))
-            mask = mx.nd.broadcast_axes(mx.nd.expand_dims(mask, axis=0),
-                                        axis=0, size=step_input.shape[0])
-        steps = mx.nd.arange(step_input.shape[1], ctx=step_input.context)
-        states.append(steps)
-        if self._scale_embed:
-            scaled_step_input = step_input * math.sqrt(step_input.shape[-1])
-        # pylint: disable=too-many-function-args
-        step_output, step_additional_outputs = \
-            super(TransformerDecoder, self).forward(scaled_step_input, states, mask)
-        states = states[:-1]
-        if has_mem_mask:
-            states[-1] = mem_mask
-        new_states = [step_input] + states
-        # If it is in testing, only output the last one
-        if len(input_shape) == 2:
-            step_output = step_output[:, -1, :]
-        return step_output, new_states, step_additional_outputs
+        assert len(step_input.shape) == 3
+        assert len(states) == 3
+        assert states[0] is None
+        assert mask is not None
+        states = states[1:]
+        return super(TransformerDecoder, self). \
+                forward(step_input, states, mask)
 
     def hybrid_forward(self, F, step_input, states, mask=None, position_weight=None):
         #pylint: disable=arguments-differ
@@ -1017,7 +979,34 @@ class TransformerDecoder(HybridBlock, Seq2SeqDecoder):
             (batch_size, num_heads, length, mem_length)
 
         """
-        has_mem_mask = (len(states) == 3)
+        has_mem_mask = True
+
+        shape0 = step_input.shape_array().slice_axis(axis=0, begin=0, end=1)
+        shape1 = step_input.shape_array().slice_axis(axis=0, begin=1, end=2)
+        shape2 = step_input.shape_array().slice_axis(axis=0, begin=2, end=3)
+
+        if has_mem_mask:
+            _, mem_mask = states
+            augmented_mem_mask = F.expand_dims(mem_mask, axis=1)
+            # TODO(junrushao1994): hacky here, need to write broadcast_axes with dynamic shape
+            fake = F.contrib.sarange(shape1).reshape((1, -1, 1)) < 0
+            augmented_mem_mask = F.broadcast_add(augmented_mem_mask, fake)
+            states[-1] = augmented_mem_mask
+        if mask is None:
+            length_array = F.contrib.sarange(shape1)
+            mask = F.broadcast_lesser_equal(
+                length_array.reshape((1, -1)),
+                length_array.reshape((-1, 1)))
+            mask = F.expand_dims(mask, axis=0)
+            # TODO(junrushao1994): hacky here, need to write broadcast_axes with dynamic shape
+            fake = F.contrib.sarange(shape0).reshape((-1, 1, 1)) < 0
+            mask = F.broadcast_add(mask, fake)
+        steps = F.contrib.sarange(shape1)
+        states.append(steps)
+        unscaled_step_input = step_input
+        if self._scale_embed:
+            step_input = F.broadcast_mul(step_input, F.sqrt(F.cast(shape2, "float32")))
+
         if has_mem_mask:
             mem_value, mem_mask, steps = states
         else:
@@ -1043,7 +1032,12 @@ class TransformerDecoder(HybridBlock, Seq2SeqDecoder):
             inputs = outputs
         if self._output_attention:
             step_additional_outputs.extend(attention_weights_l)
-        return outputs, step_additional_outputs
+        step_output = outputs
+        states = states[:-1]
+        if has_mem_mask:
+            states[-1] = mem_mask
+        new_states = [unscaled_step_input] + states
+        return step_output, new_states, step_additional_outputs
 
 
 
