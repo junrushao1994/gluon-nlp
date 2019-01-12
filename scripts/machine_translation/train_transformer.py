@@ -223,8 +223,8 @@ def evaluate(data_loader, context=ctx[0]):
     """
     translation_out = []
     all_inst_ids = []
-    avg_loss_denom = 0
-    avg_loss = 0.0
+    # avg_loss_denom = 0
+    # avg_loss = 0.0
     for _, (src_seq, tgt_seq, src_valid_length, tgt_valid_length, inst_ids) \
             in enumerate(data_loader):
         src_seq = src_seq.as_in_context(context)
@@ -232,11 +232,11 @@ def evaluate(data_loader, context=ctx[0]):
         src_valid_length = src_valid_length.as_in_context(context)
         tgt_valid_length = tgt_valid_length.as_in_context(context)
         # Calculating Loss
-        out, _ = model(src_seq, tgt_seq[:, :-1], src_valid_length, tgt_valid_length - 1)
-        loss = test_loss_function(out, tgt_seq[:, 1:], tgt_valid_length - 1).mean().asscalar()
+        # out, _ = model(src_seq, tgt_seq[:, :-1], src_valid_length, tgt_valid_length - 1)
+        # loss = test_loss_function(out, tgt_seq[:, 1:], tgt_valid_length - 1).mean().asscalar()
         all_inst_ids.extend(inst_ids.asnumpy().astype(np.int32).tolist())
-        avg_loss += loss * (tgt_seq.shape[1] - 1)
-        avg_loss_denom += (tgt_seq.shape[1] - 1)
+        # avg_loss += loss * (tgt_seq.shape[1] - 1)
+        # avg_loss_denom += (tgt_seq.shape[1] - 1)
         # Translate
         samples, _, sample_valid_length = \
             translator.translate(src_seq=src_seq, src_valid_length=src_valid_length)
@@ -246,7 +246,7 @@ def evaluate(data_loader, context=ctx[0]):
             translation_out.append(
                 [tgt_vocab.idx_to_token[ele] for ele in
                  max_score_sample[i][1:(sample_valid_length[i] - 1)]])
-    avg_loss = avg_loss / avg_loss_denom
+    # avg_loss = avg_loss / avg_loss_denom
     real_translation_out = [None for _ in range(len(all_inst_ids))]
     for ind, sentence in zip(all_inst_ids, translation_out):
         if args.bleu == 'tweaked':
@@ -294,54 +294,6 @@ def train():
         loss_denom = 0
         step_loss = 0
         log_start_time = time.time()
-        for batch_id, seqs \
-                in enumerate(train_data_loader):
-            if batch_id % grad_interval == 0:
-                step_num += 1
-                new_lr = args.lr / math.sqrt(args.num_units) \
-                         * min(1. / math.sqrt(step_num), step_num * warmup_steps ** (-1.5))
-                trainer.set_learning_rate(new_lr)
-            src_wc, tgt_wc, bs = np.sum([(shard[2].sum(), shard[3].sum(), shard[0].shape[0])
-                                         for shard in seqs], axis=0)
-            seqs = [[seq.as_in_context(context) for seq in shard]
-                    for context, shard in zip(ctx, seqs)]
-            Ls = []
-            for seq in seqs:
-                parallel.put((seq, args.batch_size))
-            Ls = [parallel.get() for _ in range(len(ctx))]
-            src_wc = src_wc.asscalar()
-            tgt_wc = tgt_wc.asscalar()
-            loss_denom += tgt_wc - bs
-            if batch_id % grad_interval == grad_interval - 1 or\
-                    batch_id == len(train_data_loader) - 1:
-                if average_param_dict is None:
-                    average_param_dict = {k: v.data(ctx[0]).copy() for k, v in
-                                          model.collect_params().items()}
-                trainer.step(float(loss_denom) / args.batch_size / 100.0)
-                param_dict = model.collect_params()
-                param_dict.zero_grad()
-                if step_num > average_start:
-                    alpha = 1. / max(1, step_num - average_start)
-                    for name, average_param in average_param_dict.items():
-                        average_param[:] += alpha * (param_dict[name].data(ctx[0]) - average_param)
-            step_loss += sum([L.asscalar() for L in Ls])
-            if batch_id % grad_interval == grad_interval - 1 or\
-                    batch_id == len(train_data_loader) - 1:
-                log_avg_loss += step_loss / loss_denom * args.batch_size * 100.0
-                loss_denom = 0
-                step_loss = 0
-            log_wc += src_wc + tgt_wc
-            if (batch_id + 1) % (args.log_interval * grad_interval) == 0:
-                wps = log_wc / (time.time() - log_start_time)
-                logging.info('[Epoch {} Batch {}/{}] loss={:.4f}, ppl={:.4f}, '
-                             'throughput={:.2f}K wps, wc={:.2f}K'
-                             .format(epoch_id, batch_id + 1, len(train_data_loader),
-                                     log_avg_loss / args.log_interval,
-                                     np.exp(log_avg_loss / args.log_interval),
-                                     wps / 1000, log_wc / 1000))
-                log_start_time = time.time()
-                log_avg_loss = 0
-                log_wc = 0
         mx.nd.waitall()
         valid_loss, valid_translation_out = evaluate(val_data_loader, ctx[0])
         valid_bleu_score, _, _, _, _ = compute_bleu([val_tgt_sentences], valid_translation_out,

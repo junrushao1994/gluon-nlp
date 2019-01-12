@@ -37,6 +37,15 @@ from .translation import NMTModel
 from .utils import _load_vocab, _load_pretrained_params
 
 
+def _dynamic_broadcast_axes(F, data, axis, size, ndim=3):
+    # TODO(junrushao1994): write a dynamic-shaped operator for broadcast_axes
+    to = [1] * ndim
+    to[axis] = -1
+    fake = F.contrib.sarange(size).reshape(to) < 0
+    data = F.expand_dims(data, axis=axis)
+    data = F.broadcast_add(data, fake)
+    return data
+
 ###############################################################################
 #                               BASE ENCODER  BLOCKS                          #
 ###############################################################################
@@ -424,11 +433,7 @@ class BaseTransformerEncoder(HybridBlock, Seq2SeqEncoder):
             mask = F.broadcast_lesser(
                 F.contrib.sarange(length).reshape((1, -1)),
                 valid_length.reshape((-1, 1)))
-            mask = F.expand_dims(mask, axis=1)
-            # TODO(@junrushao1994): actually we need a broadcast here
-            # rather than faking a dynamic shape thing.
-            fake = F.contrib.sarange(length).reshape((1, -1, 1)) < 0
-            mask = F.broadcast_add(mask, fake)
+            mask = _dynamic_broadcast_axes(F, mask, axis=1, size=length)
             states.append(mask)
         if self._scale_embed:
             # TODO(@junrushao1994): remove the hardcoded stuff
@@ -949,26 +954,33 @@ class TransformerDecoder(HybridBlock, Seq2SeqDecoder):
         """
         return super(TransformerDecoder, self).__call__(step_input, states)
 
-    def forward(self, step_input, states, mask=None):  #pylint: disable=arguments-differ, missing-docstring
-        assert len(step_input.shape) == 3
+    def forward(self, step_input, states, mask=None):  #pylint: disable=arguments-differ
+        assert mask is None
+        mask = []
+        print(len(states))
+        if len(states) == 2:
+            input_shape = step_input.shape
+            # TODO(junrushao1994): this changes the semantics because I don't want to do the case when length = 2
+            # FIXME: Fix it!
+            last_embeds = mx.nd.zeros((input_shape[0], 1, input_shape[1]), ctx=step_input.context)
+            states = [last_embeds] + states
+        assert self._encoder_valid_length is not None
+        assert len(step_input.shape) == 2
         assert len(states) == 3
-        assert states[0] is None
-        assert mask is not None
-        states = states[1:]
-        return super(TransformerDecoder, self). \
-                forward(step_input, states, mask)
+        # pylint: disable=too-many-function-args
+        step_output, new_states, step_additional_outputs = \
+            super(TransformerDecoder, self).forward(step_input, states, mask)
+        return step_output, new_states, step_additional_outputs
 
     def hybrid_forward(self, F, step_input, states, mask=None, position_weight=None):
         #pylint: disable=arguments-differ
         """
-
         Parameters
         ----------
         step_input : NDArray or Symbol, Shape (batch_size, length, C_in)
         states : list of NDArray or Symbol
         mask : NDArray or Symbol
         position_weight : NDArray or Symbol
-
         Returns
         -------
         step_output : NDArray or Symbol
@@ -977,36 +989,34 @@ class TransformerDecoder(HybridBlock, Seq2SeqDecoder):
             Either be an empty list or contains the attention weights in this step.
             The attention weights will have shape (batch_size, length, mem_length) or
             (batch_size, num_heads, length, mem_length)
-
         """
-        has_mem_mask = True
-
+        assert isinstance(mask, list) and not mask
+        mask = None
+        step_input = F.concat(states[0],
+                              F.expand_dims(step_input, axis=1),
+                              dim=1)
+        states = states[1:]
         shape0 = step_input.shape_array().slice_axis(axis=0, begin=0, end=1)
         shape1 = step_input.shape_array().slice_axis(axis=0, begin=1, end=2)
         shape2 = step_input.shape_array().slice_axis(axis=0, begin=2, end=3)
-
+        has_mem_mask = True
         if has_mem_mask:
             _, mem_mask = states
-            augmented_mem_mask = F.expand_dims(mem_mask, axis=1)
-            # TODO(junrushao1994): hacky here, need to write broadcast_axes with dynamic shape
-            fake = F.contrib.sarange(shape1).reshape((1, -1, 1)) < 0
-            augmented_mem_mask = F.broadcast_add(augmented_mem_mask, fake)
-            states[-1] = augmented_mem_mask
+            old_mem_mask = mem_mask
+            states[-1] = _dynamic_broadcast_axes(F, mem_mask, axis=1, size=shape1)
         if mask is None:
             length_array = F.contrib.sarange(shape1)
             mask = F.broadcast_lesser_equal(
                 length_array.reshape((1, -1)),
                 length_array.reshape((-1, 1)))
-            mask = F.expand_dims(mask, axis=0)
-            # TODO(junrushao1994): hacky here, need to write broadcast_axes with dynamic shape
-            fake = F.contrib.sarange(shape0).reshape((-1, 1, 1)) < 0
-            mask = F.broadcast_add(mask, fake)
+            mask = _dynamic_broadcast_axes(F, mask, axis=0, size=shape0)
         steps = F.contrib.sarange(shape1)
         states.append(steps)
         unscaled_step_input = step_input
         if self._scale_embed:
+            # TODO(@junrushao1994): remove the hardcoded stuff
             step_input = F.broadcast_mul(step_input, F.sqrt(F.cast(shape2, "float32")))
-
+        has_mem_mask = (len(states) == 3)
         if has_mem_mask:
             mem_value, mem_mask, steps = states
         else:
@@ -1035,10 +1045,11 @@ class TransformerDecoder(HybridBlock, Seq2SeqDecoder):
         step_output = outputs
         states = states[:-1]
         if has_mem_mask:
-            states[-1] = mem_mask
+            states[-1] = old_mem_mask
         new_states = [unscaled_step_input] + states
+        step_output = step_output.take(axis=1, indices=F.full((1, ), -1))
+        step_output = step_output.squeeze(axis=1)
         return step_output, new_states, step_additional_outputs
-
 
 
 ###############################################################################
