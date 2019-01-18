@@ -76,6 +76,13 @@ class BeamSearchTranslator(object):
         encoder_outputs, _ = self._model.encode(src_seq, valid_length=src_valid_length)
         decoder_states = self._model.decoder.init_state_from_encoder(encoder_outputs,
                                                                      src_valid_length)
+        assert len(decoder_states) == 2
+        # FIXME: this changes the semantics because I don't want to do the case when length = 2
+        # TODO(junrushao1994): fix these 3 lines below!
+        tgt_embed_dim = self._model.tgt_embed[0]._kwargs["output_dim"]
+        last_embeds = mx.nd.zeros((batch_size, 1, tgt_embed_dim), ctx=src_seq.context)
+        decoder_states = [last_embeds] + decoder_states
+        assert len(decoder_states) == 3
         inputs = mx.nd.full(shape=(batch_size,), ctx=src_seq.context, dtype=np.float32,
                             val=self._model.tgt_vocab.token_to_idx[self._model.tgt_vocab.bos_token])
         samples, scores, sample_valid_length = self._sampler(inputs, decoder_states)

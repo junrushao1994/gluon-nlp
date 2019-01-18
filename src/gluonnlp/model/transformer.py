@@ -958,19 +958,10 @@ class TransformerDecoder(HybridBlock, Seq2SeqDecoder):
         assert mask is None
         mask = []
         print(len(states))
-        if len(states) == 2:
-            input_shape = step_input.shape
-            # TODO(junrushao1994): this changes the semantics because I don't want to do the case when length = 2
-            # FIXME: Fix it!
-            last_embeds = mx.nd.zeros((input_shape[0], 1, input_shape[1]), ctx=step_input.context)
-            states = [last_embeds] + states
         assert self._encoder_valid_length is not None
         assert len(step_input.shape) == 2
         assert len(states) == 3
-        # pylint: disable=too-many-function-args
-        step_output, new_states, step_additional_outputs = \
-            super(TransformerDecoder, self).forward(step_input, states, mask)
-        return step_output, new_states, step_additional_outputs
+        return super(TransformerDecoder, self).forward(step_input, states, mask)
 
     def hybrid_forward(self, F, step_input, states, mask=None, position_weight=None):
         #pylint: disable=arguments-differ
