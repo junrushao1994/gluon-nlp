@@ -956,10 +956,10 @@ class TransformerDecoder(HybridBlock, Seq2SeqDecoder):
 
     def forward(self, step_input, states, mask=None):  #pylint: disable=arguments-differ
         assert mask is None
+        if isinstance(states, tuple):
+            states = list(states)
         mask = []
-        print(len(states))
         assert self._encoder_valid_length is not None
-        assert len(step_input.shape) == 2
         assert len(states) == 3
         return super(TransformerDecoder, self).forward(step_input, states, mask)
 

@@ -50,10 +50,17 @@ class BeamSearchTranslator(object):
             eos_id=model.tgt_vocab.token_to_idx[model.tgt_vocab.eos_token],
             scorer=scorer,
             max_length=max_length)
+        # TODO(junrushao1994): what is the correct way to do this?
+        self._sampler.register_child(model.src_embed)
+        self._sampler.register_child(model.tgt_embed)
+        self._sampler.register_child(model.encoder)
+        self._sampler.register_child(model.decoder)
+        self._sampler.register_child(model.tgt_proj)
+        self._sampler.hybridize(static_alloc=False)
 
     def _decode_logprob(self, step_input, states):
         out, states, _ = self._model.decode_step(step_input, states)
-        return mx.nd.log_softmax(out), states
+        return out.log_softmax(), states
 
     def translate(self, src_seq, src_valid_length):
         """Get the translation result given the input sentence.
