@@ -45,7 +45,6 @@ class BeamSearchTranslator(object):
         self._model = model
         self._sampler = BeamSearchSampler(
             batch_size=1,
-            vocab_size=36548,
             decoder=self._decode_logprob,
             beam_size=beam_size,
             eos_id=model.tgt_vocab.token_to_idx[model.tgt_vocab.eos_token],

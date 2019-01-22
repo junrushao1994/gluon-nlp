@@ -668,7 +668,8 @@ class HybridBeamSearchSampler(HybridBlock):
     """
     def __init__(self, batch_size, beam_size, decoder, eos_id,
                  scorer=BeamSearchScorer(alpha=1.0, K=5),
-                 max_length=100):
+                 max_length=100, prefix=None, params=None):
+        super(HybridBeamSearchSampler, self).__init__(prefix, params)
         self._batch_size = batch_size
         self._beam_size = beam_size
         assert beam_size > 0,\
@@ -682,69 +683,68 @@ class HybridBeamSearchSampler(HybridBlock):
             state_info = decoder.state_info()
         else:
             state_info = None
-        self._updater = _BeamSearchStepUpdate(beam_size=beam_size, eos_id=eos_id, scorer=scorer,
+        self._updater = _BeamSearchStepUpdate(beam_size=beam_size,
+                                              eos_id=eos_id,
+                                              scorer=scorer,
                                               state_info=state_info)
-        self._updater.hybridize()
 
-    def __call__(self, inputs, states):
-        """Sample by beam search.
-
-        Parameters
-        ----------
-        inputs : NDArray
-            The initial input of the decoder. Shape is (batch_size,).
-        states : Object that contains NDArrays
-            The initial states of the decoder.
-        Returns
-        -------
-        samples : NDArray
-            Samples draw by beam search. Shape (batch_size, beam_size, length). dtype is int32.
-        scores : NDArray
-            Scores of the samples. Shape (batch_size, beam_size). We make sure that scores[i, :] are
-            in descending order.
-        valid_length : NDArray
-            The valid length of the samples. Shape (batch_size, beam_size). dtype will be int32.
-        """
-        F = mx.nd
+    def hybrid_forward(self, F, inputs, states):
         batch_size = self._batch_size
         beam_size = self._beam_size
-        ctx = inputs.context
-        # Tile the states and inputs to have shape (batch_size * beam_size, ...)
-        if hasattr(self._decoder, 'state_info'):
-            state_info = self._decoder.state_info(batch_size)
-        else:
-            state_info = None
-        states = _expand_to_beam_size(states, beam_size=beam_size, batch_size=batch_size,
+        state_info = None if not hasattr(self._decoder, 'state_info') else \
+                     self._decoder.state_info(batch_size)
+        scores = F.zeros(shape=(batch_size, 1)) if beam_size == 1 else \
+                 F.concat(F.zeros(shape=(batch_size, 1)),
+                          F.full(shape=(batch_size, beam_size - 1), val=LARGE_NEGATIVE_FLOAT),
+                          dim=1)
+        states = _expand_to_beam_size(states,
+                                      beam_size=beam_size,
+                                      batch_size=batch_size,
                                       state_info=state_info)
-        step_input = _expand_to_beam_size(inputs, beam_size=beam_size,
-                                          batch_size=batch_size).astype(np.int32)
-        # All beams are initialized to alive
-        # Generated samples are initialized to be the inputs
-        # Except the first beam where the scores are set to be zero, all beams have -inf scores.
-        # Valid length is initialized to be 1
-        beam_alive_mask = F.ones(shape=(batch_size, beam_size), ctx=ctx, dtype=np.int32)
-        valid_length = F.ones(shape=(batch_size, beam_size), ctx=ctx, dtype=np.int32)
-        scores = F.zeros(shape=(batch_size, beam_size), ctx=ctx)
-        if beam_size > 1:
-            scores[:, 1:beam_size] = LARGE_NEGATIVE_FLOAT
-        samples = step_input.reshape((batch_size, beam_size, 1))
-        for i in range(self._max_length):
-            log_probs, new_states = self._decoder(step_input, states)
-            vocab_size_nd = F.array([log_probs.shape[1]], ctx=ctx, dtype=np.int32)
-            batch_shift_nd = F.arange(0, batch_size * beam_size, beam_size, ctx=ctx,
-                                          dtype=np.int32)
-            step_nd = F.array([i + 1], ctx=ctx)
+        step_input = _expand_to_beam_size(inputs,
+                                          batch_size=batch_size,
+                                          beam_size=beam_size).astype(np.int32)
+        def _loop_cond(_i, beam_alive_mask, *args):
+            return F.sum(beam_alive_mask) > 0
+
+        def _loop_body(i, beam_alive_mask, step_input, samples, valid_length, scores, *states):
+            i = i + 1
+            log_probs, states = self._decoder(step_input, states)
+            vocab_size = log_probs.shape_array().slice_axis(axis=0, begin=1, end=2).astype(np.int32)
+            batch_shift = F.arange(0, batch_size * beam_size, beam_size, dtype=np.int32)
             samples, valid_length, scores, chosen_word_ids, beam_alive_mask, states = \
-                self._updater(samples, valid_length, log_probs, scores, step_nd, beam_alive_mask,
-                              new_states, vocab_size_nd, batch_shift_nd)
+                self._updater(samples, valid_length, log_probs, scores, i, beam_alive_mask,
+                              states, vocab_size, batch_shift)
             step_input = F.relu(chosen_word_ids).reshape((-1,))
-            if F.sum(beam_alive_mask).asscalar() == 0:
-                return samples, scores, valid_length
-        final_word = F.where(beam_alive_mask,
-                             F.full(shape=(batch_size, beam_size),
-                                    val=self._eos_id, ctx=ctx, dtype=np.int32),
-                             F.full(shape=(batch_size, beam_size),
-                                    val=-1, ctx=ctx, dtype=np.int32))
-        samples = F.concat(samples, final_word.reshape((0, 0, 1)), dim=2)
-        valid_length += beam_alive_mask
+            return [], (i, beam_alive_mask, step_input, samples, valid_length, scores) + tuple(states)
+
+        _, beam_alive_mask, step_input, samples, valid_length, scores = \
+            F.contrib.while_loop(
+                cond=_loop_cond, func=_loop_body, max_iterations=self._max_length,
+                loop_vars=(
+                    F.zeros(shape=(1,), dtype=np.float32),                  # i
+                    F.ones(shape=(batch_size, beam_size), dtype=np.int32),  # beam_alive_mask
+                    step_input,                                             # step_input
+                    step_input.reshape((batch_size, beam_size, 1)),         # samples
+                    F.ones(shape=(batch_size, beam_size), dtype=np.int32),  # valid_length
+                    scores,                                                 # scores
+                ) + tuple(states)
+            )[1][:6]
+
+        def _then_func():
+            return samples, valid_length
+
+        def _else_func():
+            final_word = F.where(beam_alive_mask,
+                                 F.full(shape=(batch_size, beam_size),
+                                        val=self._eos_id, dtype=np.int32),
+                                 F.full(shape=(batch_size, beam_size),
+                                        val=-1, dtype=np.int32))
+            new_samples = F.concat(samples, final_word.reshape((0, 0, 1)), dim=2)
+            new_valid_length = valid_length + beam_alive_mask
+            return new_samples, new_valid_length
+
+        samples, valid_length = \
+            F.contrib.cond(F.sum(beam_alive_mask) == 0, _then_func, _else_func)
+
         return samples, scores, valid_length
