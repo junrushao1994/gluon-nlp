@@ -718,7 +718,7 @@ class HybridBeamSearchSampler(HybridBlock):
             step_input = F.relu(chosen_word_ids).reshape((-1,))
             return [], (i, beam_alive_mask, step_input, samples, valid_length, scores) + tuple(states)
 
-        _, beam_alive_mask, step_input, samples, valid_length, scores = \
+        _, beam_alive_mask, _, samples, valid_length, scores = \
             F.contrib.while_loop(
                 cond=_loop_cond, func=_loop_body, max_iterations=self._max_length,
                 loop_vars=(
